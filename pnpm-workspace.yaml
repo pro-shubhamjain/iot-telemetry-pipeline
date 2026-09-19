@@ -1,0 +1,10 @@
+packages:
+  - "backend"
+  - "robot-simulator"
+  - "frontend"
+  - "analytics-service"
+allowBuilds:
+  '@apollo/protobufjs': false
+  '@parcel/watcher': false
+  protobufjs: false
+  unrs-resolver: false

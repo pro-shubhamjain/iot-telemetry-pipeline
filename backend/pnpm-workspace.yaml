@@ -1,3 +1,5 @@
 allowBuilds:
+  '@apollo/protobufjs': set this to true or false
   '@parcel/watcher': false
+  protobufjs: false
   unrs-resolver: false

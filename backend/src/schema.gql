@@ -1,0 +1,30 @@
+# ------------------------------------------------------
+# THIS FILE WAS AUTOMATICALLY GENERATED (DO NOT MODIFY)
+# ------------------------------------------------------
+
+type Position {
+  x: Float!
+  y: Float!
+}
+
+type TelemetryReading {
+  robotId: String!
+  timestamp: String!
+  battery: Float!
+  temperature: Float!
+  position: Position!
+  paused: Boolean!
+}
+
+type FleetHealth {
+  robotId: String!
+  averageBatteryDrainPerReading: Float!
+  uptimePercentage: Float!
+  healthScore: String!
+}
+
+type Query {
+  telemetryHistory(robotId: String!, limit: Int! = 20): [TelemetryReading!]!
+  knownRobots: [String!]!
+  fleetHealth(robotId: String!): FleetHealth!
+}

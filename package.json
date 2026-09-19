@@ -1,11 +1,10 @@
 {
-  "name": "robot-simulator",
+  "name": "iot-telemetry-pipeline",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "ts-node index.ts",
-    "start": "ts-node index.ts"
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
   "author": "",
@@ -18,13 +17,7 @@
     }
   },
   "type": "module",
-  "dependencies": {
-    "mqtt": "^5.16.0"
-  },
   "devDependencies": {
-    "@types/mqtt": "^2.5.0",
-    "@types/node": "^26.6.1",
-    "ts-node": "^10.9.2",
-    "typescript": "5.4.5"
+    "turbo": "^2.10.13"
   }
 }

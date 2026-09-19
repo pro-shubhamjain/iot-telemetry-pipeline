@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package analytics;
+
+service AnalyticsService {
+  rpc GetFleetHealth (FleetHealthRequest) returns (FleetHealthResponse) {}
+}
+
+message TelemetryPoint {
+  double battery = 1;
+  double temperature = 2;
+  bool paused = 3;
+}
+
+message FleetHealthRequest {
+  string robotId = 1;
+  repeated TelemetryPoint readings = 2;
+}
+
+message FleetHealthResponse {
+  string robotId = 1;
+  double averageBatteryDrainPerReading = 2;
+  double uptimePercentage = 3;
+  string healthScore = 4; // "good" | "warning" | "critical"
+}
