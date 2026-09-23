@@ -2,12 +2,6 @@ import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
 import type { ClientGrpc } from '@nestjs/microservices';
 import { firstValueFrom, Observable } from 'rxjs';
 
-interface TelemetryPoint {
-  battery: number;
-  temperature: number;
-  paused: boolean;
-}
-
 interface FleetHealthResponse {
   robotId: string;
   averageBatteryDrainPerReading: number;
@@ -16,7 +10,7 @@ interface FleetHealthResponse {
 }
 
 interface AnalyticsServiceClient {
-  getFleetHealth(data: { robotId: string; readings: TelemetryPoint[] }): Observable<FleetHealthResponse>;
+  getFleetHealth(data: { robotId: string }): Observable<FleetHealthResponse>;
 }
 
 @Injectable()
@@ -29,7 +23,7 @@ export class AnalyticsClientService implements OnModuleInit {
     this.analyticsService = this.client.getService<AnalyticsServiceClient>('AnalyticsService');
   }
 
-  async getFleetHealth(robotId: string, readings: TelemetryPoint[]): Promise<FleetHealthResponse> {
-    return firstValueFrom(this.analyticsService.getFleetHealth({ robotId, readings }));
+  async getFleetHealth(robotId: string): Promise<FleetHealthResponse> {
+    return firstValueFrom(this.analyticsService.getFleetHealth({ robotId }));
   }
 }

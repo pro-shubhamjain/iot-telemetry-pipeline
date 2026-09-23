@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import * as mqtt from 'mqtt';
 import { TelemetryGateway } from './telemetry.gateway';
 import { TelemetryHistoryService } from './telemetry-history.service';
+import { TelemetryKafkaProducer } from './telemetry-kafka.producer';
 
 @Injectable()
 export class MqttBridgeService implements OnModuleInit, OnModuleDestroy {
@@ -13,6 +14,7 @@ export class MqttBridgeService implements OnModuleInit, OnModuleDestroy {
     private readonly configService: ConfigService,
     private readonly gateway: TelemetryGateway,
     private readonly history: TelemetryHistoryService,
+    private readonly kafkaProducer: TelemetryKafkaProducer,
   ) {}
 
   onModuleInit() {
@@ -25,7 +27,7 @@ export class MqttBridgeService implements OnModuleInit, OnModuleDestroy {
       this.client.subscribe('robot/+/status', { qos: 1 });
     });
 
-    this.client.on('message', (topic, payload) => {
+    this.client.on('message', async (topic, payload) => {
       const parts = topic.split('/');
       const robotId = parts[1];
       const kind = parts[2];
@@ -40,7 +42,8 @@ export class MqttBridgeService implements OnModuleInit, OnModuleDestroy {
 
       if (kind === 'telemetry') {
         this.gateway.broadcastTelemetry(data);
-        this.history.record(data); // <-- new: store every reading as it arrives
+        this.history.record(data);
+        await this.kafkaProducer.publishTelemetry(data); 
       } else if (kind === 'status') {
         this.gateway.broadcastStatus(robotId, data);
       }

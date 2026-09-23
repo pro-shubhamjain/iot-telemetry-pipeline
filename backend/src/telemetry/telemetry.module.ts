@@ -7,6 +7,7 @@ import { CommandController } from './command.controller';
 import { TelemetryHistoryService } from './telemetry-history.service';
 import { TelemetryResolver } from './telemetry.resolver';
 import { AnalyticsClientService } from './analytics-client.service';
+import { TelemetryKafkaProducer } from './telemetry-kafka.producer';
 
 @Module({
   imports: [
@@ -29,6 +30,7 @@ import { AnalyticsClientService } from './analytics-client.service';
     TelemetryHistoryService,
     TelemetryResolver,
     AnalyticsClientService,
+    TelemetryKafkaProducer,
   ],
 })
 export class TelemetryModule {}

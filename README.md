@@ -1,244 +1,176 @@
-# IoT Telemetry Pipeline
+# iot-telemetry-pipeline
 
-A working example of a fleet telemetry system that uses different protocols for different tasks:
+A fleet-telemetry system that deliberately uses a different protocol for each job it's actually good at: MQTT for device ingestion, WebSocket for live push, REST for simple commands, GraphQL for flexible historical queries, gRPC for internal service-to-service calls, and Kafka for durable, replayable event streaming between backend services.
 
-- MQTT for communication between robots and the backend
-- WebSocket for live telemetry updates
-- REST for sending commands
-- GraphQL for querying historical data
-- gRPC for communication between internal services
+## Data flow
 
-## Data Flow
+**Ingestion (robot -> dashboard):**
+Robot(s) -> MQTT publish -> Mosquitto Broker -> MQTT subscribe -> Backend -> WebSocket push -> Browser Dashboard
 
-### Ingestion: Robot to Dashboard
+**Commands (dashboard -> robot):**
+Browser Dashboard -> REST POST -> Backend -> MQTT publish -> Robot(s)
 
-Robot → MQTT publish → Mosquitto Broker → MQTT subscribe → Backend → WebSocket push → Browser Dashboard
+**Historical queries (dashboard -> backend):**
+Browser Dashboard -> GraphQL query -> Backend (reads in-memory telemetry history)
 
-### Commands: Dashboard to Robot
+**Event streaming (backend -> analytics service, continuous):**
+Backend -> produces every telemetry reading to Kafka topic `telemetry.raw` -> Analytics Service consumes independently and maintains a continuously-updated fleet-health value per robot in memory. This runs constantly, whether or not anyone is looking at the dashboard.
 
-Browser Dashboard → REST POST → Backend → MQTT publish → Robot
-
-### Historical Queries: Dashboard to Backend
-
-Browser Dashboard → GraphQL query → Backend → Telemetry history
-
-### Fleet Analytics: Backend to Analytics Service
-
-Backend → gRPC call → Analytics Service → gRPC response → Dashboard through a GraphQL field
-
-The analytics service calculates fleet statistics such as uptime, average battery drain, and health scores.
+**Fleet analytics (dashboard -> backend -> internal service, on-demand):**
+Browser Dashboard -> GraphQL query (`fleetHealth`) -> Backend -> gRPC call to Analytics Service ("what's your current fleet health for this robot?") -> Analytics Service returns its already-computed value instantly (no recomputation) -> back through GraphQL -> Dashboard
 
 ## Architecture
 
-| Component | Role | Protocols |
+| Component | Role | Protocol(s) |
 |---|---|---|
-| **Broker (Mosquitto)** | Routes publish and subscribe messages between robots and the backend. | MQTT |
-| **Robot simulator** | Simulates robot firmware. Publishes telemetry at regular intervals, subscribes to command messages, and registers a Last Will and Testament (LWT) to report unexpected disconnections. | MQTT |
-| **Backend (NestJS)** | Receives telemetry over MQTT, sends live updates through WebSocket, handles REST commands, serves GraphQL queries, and communicates with the analytics service over gRPC. | MQTT, WebSocket, REST, GraphQL, gRPC client |
-| **Analytics service (NestJS)** | An internal service that calculates fleet-level statistics using telemetry data provided by the backend. It is not accessed directly by the browser. | gRPC server |
-| **Dashboard** | A plain HTML, JavaScript, and CSS application. Displays live telemetry, sends commands, and queries historical data and fleet health. | WebSocket, REST, GraphQL |
+| **Mosquitto** | Routes pub/sub messages between robots and backend. | MQTT |
+| **Kafka** | Durable, replayable event log for telemetry. Decouples "data arrived" from "data gets processed" -- the backend doesn't need to know who's consuming, and consumers can be added later without touching the producer. | Kafka |
+| **Robot simulator** | Stands in for real robot firmware -- publishes telemetry on an interval, subscribes to commands, registers a Last Will and Testament so the broker can announce it going offline unexpectedly. | MQTT |
+| **Backend (NestJS)** | Ingests MQTT, pushes live data over WebSocket, accepts REST commands, serves GraphQL queries, produces telemetry events to Kafka, and asks the analytics service for its current fleet-health value over gRPC. | MQTT, WebSocket, REST, GraphQL, gRPC (client), Kafka (producer) |
+| **Analytics service (NestJS)** | Internal-only. Continuously consumes the Kafka telemetry stream and maintains an always-up-to-date fleet-health value per robot in memory; serves that value on-demand over gRPC. Never touched by the browser directly. | gRPC (server), Kafka (consumer) |
+| **Frontend (React + shadcn/ui)** | Vite + React dashboard. WebSocket for live data, REST for commands, GraphQL for history/fleet-health queries. Never touches MQTT, gRPC, or Kafka -- those stay internal. | WebSocket, REST, GraphQL (client) |
 
-## Why Each Protocol Is Used
+### Why each protocol is where it is
+- **MQTT** -- the right choice for many small, frequent, possibly-unreliable device connections. Not replaceable by REST/GraphQL here.
+- **WebSocket** -- the browser needs a live *push*, not something it polls for.
+- **REST** -- a command is a single fire-and-forget action; REST's simplicity fits, and the browser can't call gRPC directly at all.
+- **GraphQL** -- historical queries need flexible field/range selection, which is exactly what GraphQL is for.
+- **gRPC** -- a lightweight, synchronous "what's the current value?" request between two known services, with a fixed strict contract -- the textbook gRPC use case. Notably, the gRPC request here carries almost no payload (just a robot ID) -- all the heavy lifting already happened asynchronously via Kafka.
+- **Kafka** -- sits at a different layer than gRPC: gRPC is synchronous request/response between two known services; Kafka is asynchronous, durable, and supports multiple independent consumers reading the same stream without the producer knowing or caring who they are. Fleet health here is computed continuously in the background from the Kafka stream -- gRPC just retrieves whatever's already been computed, rather than recalculating it on every call. This project uses **both** deliberately, to demonstrate the distinction rather than picking one and using it everywhere.
 
-### MQTT
+### On persistence (deliberately not included)
+All state (telemetry history, fleet health) is kept **in memory** -- a `Map`/array inside each service, lost on restart. This is intentional: the project's focus is protocol choices, not data storage, and adding a database wouldn't teach anything new about MQTT/WebSocket/REST/GraphQL/gRPC/Kafka. In a real production system, both `TelemetryHistoryService` (backend) and `AnalyticsService` (analytics-service) would be backed by a real time-series database (see Roadmap) -- the tradeoff being accepted here is explicit, not accidental.
 
-MQTT is designed for lightweight, frequent communication between devices. It works well for robots that may have limited resources or unreliable network connections.
+### Key MQTT concepts this project demonstrates
+- **Topics & wildcards** -- `robot/+/telemetry` scales to any number of robots.
+- **QoS levels** -- telemetry QoS 0 (fire-and-forget), commands/status QoS 1 (at-least-once).
+- **Retained messages** -- `status` topic retained, so late-joining dashboards see current state immediately.
+- **Last Will and Testament (LWT)** -- broker auto-publishes "offline" if a robot disconnects ungracefully.
 
-In this project, MQTT handles telemetry, commands, and robot status updates.
+### Key Kafka concepts this project demonstrates
+- **Topics as durable logs** -- `telemetry.raw` retains messages so a consumer that starts late (or restarts) can catch up, unlike MQTT's fire-and-forget QoS 0 telemetry.
+- **Decoupled, stateful consumers** -- analytics-service consumes independently of the backend producing, and maintains its own running state from the stream rather than being told what to compute on each request.
+- **Consumer groups** -- analytics-service joins Kafka as `analytics-group`; a second instance with the same group ID would split partitions for load-balancing, while a different group ID would let it see the full stream independently.
+- **KRaft mode** -- this project runs Kafka without a separate Zookeeper container, using Kafka's newer built-in metadata quorum.
 
-### WebSocket
+## Tooling choices
 
-The dashboard needs to receive telemetry updates as soon as they arrive. WebSocket provides a persistent connection that allows the backend to push updates to the browser without requiring the browser to poll repeatedly.
+- **Monorepo: pnpm workspace + Turborepo** -- `backend`, `analytics-service`, `robot-simulator`, and `frontend` are all workspace packages under one `pnpm-workspace.yaml`. `turbo run dev` runs every service's `dev` script in parallel from one command (the frontend is typically run in its own terminal alongside it for cleaner log output, but is fully wired into the same workspace and `turbo.json`).
+- **Backend & analytics-service: NestJS** -- first-class support for REST, GraphQL, gRPC, WebSocket, MQTT, and Kafka all in one framework, which is why it's the right choice once combining this many protocols.
+- **Robot simulator: plain Node.js + TypeScript** -- a lightweight standalone process, not a service, so it doesn't need Nest's structure. Run via `ts-node`.
+- **Frontend: React (Vite) + shadcn/ui + Tailwind** -- component-driven UI, chosen once the dashboard needed to juggle WebSocket + REST + GraphQL state together in one interface.
+- **Package manager: pnpm** -- workspace-native, fast installs, shared content-addressable store.
 
-### REST
+## Project structure
 
-REST is used for simple commands, such as pausing a robot. The dashboard sends an HTTP request to the backend, and the backend publishes the corresponding command over MQTT.
-
-### GraphQL
-
-GraphQL is used to query historical telemetry and fleet health data. The dashboard can request only the fields and time range it needs, such as battery level and timestamps for a specific robot over the last 24 hours.
-
-### gRPC
-
-gRPC is used for internal communication between the backend and the analytics service. It provides a defined service contract and is suitable for service-to-service communication.
-
-The analytics service is not exposed directly to the browser. Only the backend communicates with it.
-
-## MQTT Concepts Demonstrated
-
-- **Topics and wildcards:** `robot/+/telemetry` allows the backend to subscribe to telemetry from multiple robots.
-- **QoS levels:** Telemetry uses QoS 0, while commands and status messages use QoS 1.
-- **Retained messages:** The retained status topic allows new subscribers to receive the latest robot status immediately.
-- **Last Will and Testament (LWT):** The broker publishes an `offline` status when a robot disconnects unexpectedly.
-
-## Tooling Choices
-
-- **Backend and analytics service: NestJS**  
-  NestJS provides support for REST, GraphQL, gRPC, WebSocket, and MQTT. It helps keep the implementation organized while using multiple communication protocols.
-
-- **Robot simulator: Plain Node.js**  
-  The simulator is a lightweight standalone process, so it does not need the additional structure of NestJS.
-
-- **Package manager: pnpm**  
-  pnpm is used for package installation. The `backend/`, `analytics-service/`, and `robot-simulator/` directories are separate projects, not a pnpm workspace or monorepo.
-
-## Project Structure
-
-```text
+```
 iot-telemetry-pipeline/
-├── docker-compose.yml
+├── pnpm-workspace.yaml
+├── turbo.json
+├── docker-compose.yml          # Mosquitto + Kafka
 ├── mosquitto/
 │   └── config/mosquitto.conf
 ├── robot-simulator/
 │   ├── package.json
-│   └── index.js
-├── analytics-service/                 # gRPC server
-│   ├── proto/
-│   │   └── analytics.proto
+│   └── index.ts
+├── analytics-service/                 # gRPC server + Kafka consumer
+│   ├── src/proto/analytics.proto
 │   ├── package.json
 │   └── src/
 │       ├── main.ts
 │       ├── app.module.ts
 │       └── analytics/
-│           ├── analytics.controller.ts   # gRPC method handlers
-│           └── analytics.service.ts      # Statistics calculation
-├── backend/                            # Main application
+│           ├── analytics.controller.ts        # @GrpcMethod handler
+│           ├── analytics.service.ts           # running fleet-health state
+│           └── analytics-kafka.consumer.ts    # Kafka consumer, feeds the state
+├── backend/                            # speaks every protocol
+│   ├── src/proto/analytics.proto
 │   ├── package.json
 │   └── src/
 │       ├── main.ts
 │       ├── app.module.ts
-│       ├── telemetry/                  # MQTT ingestion, WebSocket, and REST commands
+│       ├── telemetry/
 │       │   ├── mqtt-bridge.service.ts
-│       │   ├── telemetry.gateway.ts       # WebSocket gateway
-│       │   ├── command.controller.ts      # REST controller
-│       │   ├── telemetry-history.service.ts  # In-memory telemetry storage
+│       │   ├── telemetry.gateway.ts          # WebSocket
+│       │   ├── command.controller.ts         # REST
+│       │   ├── telemetry-history.service.ts
+│       │   ├── telemetry.resolver.ts         # GraphQL
+│       │   ├── telemetry.type.ts
+│       │   ├── fleet-health.type.ts
+│       │   ├── analytics-client.service.ts   # gRPC client
+│       │   ├── telemetry-kafka.producer.ts   # Kafka producer
 │       │   └── telemetry.module.ts
-│       ├── graphql/                    # Historical queries and fleet health
-│       │   ├── telemetry.resolver.ts
-│       │   ├── robot.type.ts
-│       │   └── graphql.module.ts
-│       └── analytics-client/           # gRPC client
-│           ├── analytics-client.service.ts
-│           └── analytics-client.module.ts
-└── frontend/
-    ├── index.html
-    ├── app.js                          # WebSocket, REST, and GraphQL calls
-    └── style.css
+└── frontend/                           # React + Vite + shadcn/ui
+    ├── src/
+    │   ├── App.tsx
+    │   ├── index.css
+    │   ├── components/ui/       # shadcn components (card, button, badge)
+    │   └── lib/utils.ts
+    ├── vite.config.ts
+    └── components.json
 ```
 
-## Running the Project
+## Running it from scratch
 
-### Prerequisites
+**Prerequisites:** Docker Desktop, Node.js 18+, pnpm (`npm install -g pnpm`).
 
-Make sure you have the following installed:
-
-- Docker Desktop
-- Node.js 18 or later
-- pnpm
-
-Install pnpm if needed:
-
+### 1. Install everything from the workspace root
 ```powershell
-npm install -g pnpm
+cd D:\GithubRepos\iot-telemetry-pipeline
+pnpm install
 ```
 
-### 1. Start the MQTT Broker
-
-From the project root, run:
-
+### 2. Start Mosquitto + Kafka
 ```powershell
 docker compose up -d
 docker ps
 ```
+Confirm both `mqtt-broker` and `kafka-broker` show `Up`.
 
-Confirm that the `mqtt-broker` container is running.
-
-### 2. Test the Broker Using the MQTT CLI
-
-This step is optional but useful for verifying that the broker is working.
-
-**Terminal 1: Subscribe to robot messages**
-
+### 3. (Optional) Sanity-check each broker with the CLI
+MQTT:
 ```powershell
 mosquitto_sub -h localhost -t "robot/#" -v
+mosquitto_pub -h localhost -t "robot/robot-01/telemetry" -m '{"battery":95}'
 ```
-
-**Terminal 2: Publish a test message**
-
+Kafka:
 ```powershell
-mosquitto_pub -h localhost -t "robot/robot-01/telemetry" -m "{\"battery\":95}"
+docker exec -it kafka-broker /opt/kafka/bin/kafka-console-consumer.sh --topic telemetry.raw --bootstrap-server localhost:9092
+docker exec -it kafka-broker /opt/kafka/bin/kafka-console-producer.sh --topic telemetry.raw --bootstrap-server localhost:9092
 ```
 
-The message should appear in Terminal 1.
-
-### 3. Start the Analytics Service
-
-Open a new terminal:
-
+### 4. Start the backend services together
 ```powershell
-cd analytics-service
-pnpm install
-pnpm run start:dev
+pnpm turbo run dev
 ```
+This starts `backend`, `robot-simulator`, and `analytics-service` in parallel with prefixed logs.
 
-Look for a message similar to:
-
-```text
-Analytics gRPC service listening on 0.0.0.0:5001
-```
-
-### 4. Start the Backend
-
-Open another terminal:
-
+### 5. Start the frontend (separately, for cleaner logs)
 ```powershell
-cd backend
-pnpm install
-pnpm run start:dev
+cd frontend
+pnpm dev
 ```
+Open the URL Vite prints (typically `http://localhost:5173`).
 
-Check the logs to confirm that:
+### 6. Test each protocol
+- **MQTT:** robot simulator logs show telemetry publishing every 2s.
+- **WebSocket:** dashboard cards update live without refreshing.
+- **REST:** click **Pause** on the dashboard -- robot simulator logs the received command.
+- **GraphQL:** query `telemetryHistory` or `fleetHealth` at `http://localhost:3000/graphql`.
+- **gRPC:** the `fleetHealth` GraphQL field triggers a lightweight backend -> analytics-service call internally -- check analytics-service's logs to see it's returning a value it already computed, not recalculating.
+- **Kafka:** analytics-service's logs should show it consuming telemetry continuously, completely independent of whether the `fleetHealth` query is ever called.
 
-- The backend is connected to MQTT.
-- The WebSocket gateway is running.
-- The GraphQL endpoint is available.
-
-The GraphQL endpoint is typically:
-
-```text
-http://localhost:3000/graphql
-```
-
-### 5. Start the Robot Simulator
-
-Open another terminal:
-
+### 7. Test failure detection (the LWT)
 ```powershell
-cd robot-simulator
-pnpm install
-pnpm start
+Get-Process node
+Stop-Process -Id <PID> -Force
 ```
+Dashboard should flip to "OFFLINE" within a couple of seconds.
 
-The simulator should begin publishing telemetry and listening for commands.
-
-### 6. Open the Dashboard
-
-Open `frontend/index.html` in a browser.
-
-The dashboard should display:
-
-- Live telemetry through WebSocket
-- Robot commands, such as **Pause**, through REST
-- Historical telemetry through GraphQL
-
-### 7. Test Each Protocol
-
-- **REST:** Click the **Pause** button and confirm that the robot simulator receives the command.
-- **WebSocket:** Watch the battery and temperature values update without refreshing the page.
-- **GraphQL:** Open `http://localhost:3000/graphql` and run a query for historical telemetry or fleet health.
-- **MQTT:** Use the MQTT CLI or robot simulator logs to verify telemetry and command messages.
-- **gRPC:** Check the backend and analytics service logs to confirm that the backend can call the analytics service.
-
-## Summary
-
-This project demonstrates how multiple communication protocols can work together in a fleet telemetry system. Each protocol has a specific role, while the backend acts as the central connection between the robots, dashboard, and internal analytics service.
+## Roadmap / possible extensions
+- Replace in-memory state with a real time-series store (InfluxDB/TimescaleDB) in both `TelemetryHistoryService` and `AnalyticsService`, so data survives restarts and multiple instances can share state
+- Add a second, independent Kafka consumer (e.g. a persistence-service) to prove the "add consumers without touching the producer" property
+- Multiple simulated robots running concurrently
+- Broker authentication (MQTT `password_file`, Kafka SASL) instead of anonymous/plaintext access
+- TLS for MQTT, gRPC, and Kafka
+- Swap the simulator for a real robot (ESP32/Raspberry Pi)

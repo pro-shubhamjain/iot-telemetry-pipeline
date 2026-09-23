@@ -24,11 +24,8 @@ export class TelemetryResolver {
     return this.history.getKnownRobotIds();
   }
 
-  // This is the field that internally triggers a gRPC call - the browser
-  // just sees a normal GraphQL field, never knows gRPC is involved.
   @Query(() => FleetHealth)
   async fleetHealth(@Args('robotId') robotId: string): Promise<FleetHealth> {
-    const readings = this.history.getHistory(robotId, 50);
-    return this.analyticsClient.getFleetHealth(robotId, readings);
+    return this.analyticsClient.getFleetHealth(robotId); 
   }
 }
